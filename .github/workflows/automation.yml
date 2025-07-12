@@ -1,0 +1,128 @@
+name: 楽天ROOM自動化
+
+on:
+  schedule:
+    # 毎日午前10時（JST）に実行
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '実行モード'
+        required: true
+        default: 'collect'
+        type: choice
+        options:
+        - collect
+        - post
+        - full
+      products:
+        description: '商品収集数'
+        required: false
+        default: '2'
+      max_posts:
+        description: '最大投稿数'
+        required: false
+        default: '2'
+
+jobs:
+  automation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+    - name: チェックアウト
+      uses: actions/checkout@v4
+    
+    - name: Python環境設定
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    
+    - name: 仮想ディスプレイ設定
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y xvfb
+        export DISPLAY=:99
+        Xvfb :99 -screen 0 1280x720x24 > /dev/null 2>&1 &
+        sleep 3
+        echo "DISPLAY=:99" >> $GITHUB_ENV
+    
+    - name: 依存関係インストール
+      run: |
+        pip install -r requirements.txt
+        playwright install chromium --with-deps
+    
+    - name: 環境変数確認
+      env:
+        RAKUTEN_APP_ID: ${{ secrets.RAKUTEN_APP_ID }}
+        ROOM_EMAIL: ${{ secrets.ROOM_EMAIL }}
+        ROOM_PASSWORD: ${{ secrets.ROOM_PASSWORD }}
+        GSPREAD_KEY: ${{ secrets.GSPREAD_KEY }}
+        GSA_JSON_B64: ${{ secrets.GSA_JSON_B64 }}
+      run: |
+        echo "環境変数確認中..."
+        if [ -z "$RAKUTEN_APP_ID" ] || [ -z "$ROOM_EMAIL" ] || [ -z "$ROOM_PASSWORD" ] || [ -z "$GSPREAD_KEY" ] || [ -z "$GSA_JSON_B64" ]; then
+          echo "❌ 必須の環境変数が設定されていません"
+          exit 1
+        fi
+        echo "✅ 環境変数確認完了"
+    
+    - name: Google Sheets接続テスト
+      env:
+        GSPREAD_KEY: ${{ secrets.GSPREAD_KEY }}
+        GSA_JSON_B64: ${{ secrets.GSA_JSON_B64 }}
+      run: |
+        echo "Google Sheets接続テスト中..."
+        python3 -c "
+        import os, base64, json, gspread
+        sa_json_b64 = os.environ['GSA_JSON_B64']
+        sa_info_json = base64.b64decode(sa_json_b64)
+        sa_info = json.loads(sa_info_json)
+        gc = gspread.service_account_from_dict(sa_info)
+        sh = gc.open_by_key(os.environ['GSPREAD_KEY'])
+        worksheets = sh.worksheets()
+        print(f'✅ Google Sheets接続成功: {len(worksheets)}個のシート')
+        "
+    
+    - name: メイン処理実行
+      env:
+        RAKUTEN_APP_ID: ${{ secrets.RAKUTEN_APP_ID }}
+        ROOM_EMAIL: ${{ secrets.ROOM_EMAIL }}
+        ROOM_PASSWORD: ${{ secrets.ROOM_PASSWORD }}
+        GSPREAD_KEY: ${{ secrets.GSPREAD_KEY }}
+        GSA_JSON_B64: ${{ secrets.GSA_JSON_B64 }}
+        DISPLAY: :99
+      run: |
+        MODE="${{ github.event.inputs.mode || 'collect' }}"
+        PRODUCTS="${{ github.event.inputs.products || '2' }}"
+        MAX_POSTS="${{ github.event.inputs.max_posts || '2' }}"
+        
+        echo "実行設定:"
+        echo "  モード: $MODE"
+        echo "  商品数: $PRODUCTS"
+        echo "  最大投稿数: $MAX_POSTS"
+        echo ""
+        
+        python3 src/main.py --mode $MODE --products $PRODUCTS --max-posts $MAX_POSTS
+    
+    - name: 実行結果確認
+      if: always()
+      run: |
+        echo "実行結果:"
+        ls -la *.json *.log 2>/dev/null || echo "ログファイルなし"
+        
+        if [ -f "daily_stats.json" ]; then
+          echo "日次統計:"
+          cat daily_stats.json
+        fi
+    
+    - name: ログ保存
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: logs-${{ github.run_number }}
+        path: |
+          *.json
+          *.log
+        retention-days: 7
+        if-no-files-found: ignore
