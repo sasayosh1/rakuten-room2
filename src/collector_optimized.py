@@ -163,37 +163,9 @@ class ProductCollector:
             
         except Exception as e:
             print(f"スクレイピングエラー: {e}")
-            # フォールバック: ダミーデータ生成
-            return self._generate_dummy_products(keyword, max_products)
+            print(f"⚠️  キーワード '{keyword}' の商品取得に失敗しました")
+            return []  # 実商品が取得できない場合は空のリストを返す
     
-    def _generate_dummy_products(self, keyword: str, max_products: int) -> List[Product]:
-        """ダミー商品データ生成（完全フォールバック）"""
-        print(f"ダミーデータ生成: {keyword}")
-        
-        products = []
-        for i in range(max_products):
-            title = f"{keyword} おすすめ商品 #{i+1}"
-            product_url = f"https://item.rakuten.co.jp/dummy/{keyword}-{i+1}/"
-            price = f"{random.randint(1000, 8000):,}円"
-            rating = f"{random.uniform(3.8, 4.9):.1f}"
-            review_count = f"{random.randint(50, 300)}件"
-            
-            description = f"✨ {title}\n\n価格: {price}\n⭐ 評価: {rating}\n\n{keyword}に最適な商品です！"
-            
-            product = Product(
-                title=title,
-                url=product_url,
-                price=price,
-                image_url="https://example.com/image.jpg",
-                shop_name="楽天おすすめショップ",
-                rating=rating,
-                review_count=review_count,
-                description=description
-            )
-            
-            products.append(product)
-        
-        return products
     
     def _parse_api_results(self, data: Dict) -> List[Product]:
         """APIレスポンスをパース"""
@@ -322,6 +294,8 @@ class ProductCollector:
         
         print(f"\n✅ 収集完了: 合計 {total_collected} 商品")
         print(f"API呼び出し回数: {len(KEYWORDS) * len(list(KEYWORDS.values())[0])}回（従来の半分）")
+        if total_collected == 0:
+            print("⚠️  実商品データを取得できませんでした。投稿はスキップされます。")
         return total_collected
 
 

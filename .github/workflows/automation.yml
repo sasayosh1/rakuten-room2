@@ -61,9 +61,12 @@ jobs:
         GSA_JSON_B64: ${{ secrets.GSA_JSON_B64 }}
       run: |
         echo "環境変数確認中..."
-        if [ -z "$RAKUTEN_APP_ID" ] || [ -z "$ROOM_EMAIL" ] || [ -z "$ROOM_PASSWORD" ] || [ -z "$GSPREAD_KEY" ] || [ -z "$GSA_JSON_B64" ]; then
+        if [ -z "$ROOM_EMAIL" ] || [ -z "$ROOM_PASSWORD" ] || [ -z "$GSPREAD_KEY" ] || [ -z "$GSA_JSON_B64" ]; then
           echo "❌ 必須の環境変数が設定されていません"
           exit 1
+        fi
+        if [ -z "$RAKUTEN_APP_ID" ]; then
+          echo "⚠️  RAKUTEN_APP_IDが未設定：スクレイピングモードで動作"
         fi
         echo "✅ 環境変数確認完了"
     
