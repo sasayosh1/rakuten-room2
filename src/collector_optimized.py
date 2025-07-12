@@ -61,14 +61,13 @@ class ProductCollector:
         
         # 楽天APIが使用可能かチェック
         self.use_api = bool(os.environ.get("RAKUTEN_APP_ID"))
-        print(f"楽天API使用: {'有効' if self.use_api else '無効（スクレイピングモード）'}")
+        print(f"取得方法: スクレイピング優先{'+ API併用' if self.use_api else ''}")
     
     def search_products_api(self, keyword: str, max_products: int = 3) -> List[Product]:
         """楽天API使用（従来方式・商品数削減）"""
         if not self.use_api:
             return []
             
-        print(f"API検索: {keyword}")
         
         params = {
             'applicationId': os.environ["RAKUTEN_APP_ID"],
@@ -88,16 +87,13 @@ class ProductCollector:
             
             data = response.json()
             products = self._parse_api_results(data)
-            print(f"API取得: {len(products)}件")
             return products
             
         except Exception as e:
-            print(f"API検索エラー（スクレイピングにフォールバック）: {e}")
-            return self.search_products_scraping(keyword, max_products)
+            return []
     
     def search_products_scraping(self, keyword: str, max_products: int = 3) -> List[Product]:
         """スクレイピング検索（API不要）"""
-        print(f"スクレイピング検索: {keyword}")
         
         # 楽天市場の検索URLを直接叩く
         url = f"https://search.rakuten.co.jp/search/mall/{keyword}/"
@@ -158,13 +154,10 @@ class ProductCollector:
                     print(f"商品パースエラー: {e}")
                     continue
                     
-            print(f"スクレイピング取得: {len(products)}件")
             return products
             
         except Exception as e:
-            print(f"スクレイピングエラー: {e}")
-            print(f"⚠️  キーワード '{keyword}' の商品取得に失敗しました")
-            return []  # 実商品が取得できない場合は空のリストを返す
+            return []
     
     
     def _parse_api_results(self, data: Dict) -> List[Product]:
@@ -267,11 +260,12 @@ class ProductCollector:
             
             all_products = []
             for keyword in keywords:
-                # APIまたはスクレイピングで商品検索
-                if self.use_api:
+                # 取得確率が高い方法を優先
+                products = self.search_products_scraping(keyword, products_per_keyword)
+                
+                # スクレイピングで取得できない場合はAPIを試行
+                if not products and self.use_api:
                     products = self.search_products_api(keyword, products_per_keyword)
-                else:
-                    products = self.search_products_scraping(keyword, products_per_keyword)
                 
                 all_products.extend(products)
                 
@@ -293,9 +287,6 @@ class ProductCollector:
             time.sleep(random.uniform(3, 7))  # カテゴリ間の長めの休憩
         
         print(f"\n✅ 収集完了: 合計 {total_collected} 商品")
-        print(f"API呼び出し回数: {len(KEYWORDS) * len(list(KEYWORDS.values())[0])}回（従来の半分）")
-        if total_collected == 0:
-            print("⚠️  実商品データを取得できませんでした。投稿はスキップされます。")
         return total_collected
 
 
