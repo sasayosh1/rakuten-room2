@@ -43,6 +43,15 @@ class RoomPoster:
         
         # ログ設定
         self.setup_logging()
+        
+        # 監視設定
+        self.metrics_file = Path("performance_metrics.json")
+        self.health_thresholds = {
+            'success_rate_warning': 0.7,  # 70%未満で警告
+            'success_rate_critical': 0.5,  # 50%未満で緊急
+            'consecutive_errors_warning': 2,
+            'consecutive_errors_critical': 3
+        }
     
     def setup_logging(self):
         """ログ設定"""
@@ -191,35 +200,405 @@ class RoomPoster:
         print("✅ ドライラン完了：すべての商品が投稿可能な状態です")
         return len(products)  # シミュレーション成功として件数を返す
     
-    def calculate_success_rate(self) -> float:
-        """成功率を計算"""
-        if not self.error_file.exists():
-            return 1.0  # エラーファイルがない場合は100%
+    def calculate_success_rate(self, days_back: int = 7) -> dict:
+        """詳細な成功率計算"""
+        metrics = {
+            'current_rate': 1.0,
+            'weekly_rate': 1.0,
+            'trend': 'stable',
+            'consecutive_errors': 0,
+            'total_executions': 0,
+            'successful_executions': 0,
+            'last_success': None,
+            'last_error': None
+        }
         
-        with open(self.error_file, "r", encoding="utf-8") as f:
-            error_data = json.load(f)
+        # エラー追跡データから計算
+        if self.error_file.exists():
+            with open(self.error_file, "r", encoding="utf-8") as f:
+                error_data = json.load(f)
+            
+            metrics['consecutive_errors'] = error_data.get("consecutive_errors", 0)
+            recent_errors = error_data.get("last_errors", [])
+            
+            if recent_errors:
+                metrics['last_error'] = recent_errors[-1]['timestamp']
         
-        # 直近10回の実行を評価
-        recent_errors = error_data.get("last_errors", [])
-        if not recent_errors:
-            return 1.0
+        # パフォーマンスメトリクスから詳細計算
+        if self.metrics_file.exists():
+            with open(self.metrics_file, "r", encoding="utf-8") as f:
+                performance_data = json.load(f)
+            
+            # 週間実行データを分析
+            from datetime import datetime, timedelta
+            cutoff_date = datetime.now() - timedelta(days=days_back)
+            recent_executions = [
+                exec_data for exec_data in performance_data.get('executions', [])
+                if datetime.fromisoformat(exec_data['timestamp']) > cutoff_date
+            ]
+            
+            if recent_executions:
+                metrics['total_executions'] = len(recent_executions)
+                metrics['successful_executions'] = sum(
+                    1 for exec_data in recent_executions 
+                    if exec_data.get('success', False)
+                )
+                metrics['weekly_rate'] = metrics['successful_executions'] / metrics['total_executions']
+                
+                # 最新成功日時
+                successful_executions = [
+                    exec_data for exec_data in recent_executions 
+                    if exec_data.get('success', False)
+                ]
+                if successful_executions:
+                    metrics['last_success'] = successful_executions[-1]['timestamp']
         
-        # 直近のエラー数から成功率を推定
-        consecutive_errors = error_data.get("consecutive_errors", 0)
-        if consecutive_errors == 0:
-            return 1.0
-        elif consecutive_errors <= 2:
-            return 0.8
+        # 現在の成功率（従来ロジック）
+        if metrics['consecutive_errors'] == 0:
+            metrics['current_rate'] = 1.0
+        elif metrics['consecutive_errors'] <= 2:
+            metrics['current_rate'] = 0.8
         else:
-            return 0.5
+            metrics['current_rate'] = 0.5
+        
+        # トレンド分析
+        if metrics['weekly_rate'] > 0.8:
+            metrics['trend'] = 'improving'
+        elif metrics['weekly_rate'] < 0.6:
+            metrics['trend'] = 'degrading'
+        else:
+            metrics['trend'] = 'stable'
+        
+        return metrics
+    
+    def monitor_system_health(self) -> dict:
+        """システムヘルス監視"""
+        health = {
+            'status': 'healthy',
+            'alerts': [],
+            'warnings': [],
+            'last_check': datetime.now().isoformat(),
+            'uptime_info': {},
+            'performance_summary': {}
+        }
+        
+        # 成功率チェック
+        metrics = self.calculate_success_rate()
+        current_rate = metrics['current_rate']
+        weekly_rate = metrics['weekly_rate']
+        
+        # 成功率アラート
+        if current_rate <= self.health_thresholds['success_rate_critical']:
+            health['status'] = 'critical'
+            health['alerts'].append({
+                'type': 'success_rate_critical',
+                'message': f"成功率が危険レベル: {current_rate*100:.1f}%",
+                'threshold': f"{self.health_thresholds['success_rate_critical']*100:.0f}%",
+                'severity': 'high'
+            })
+        elif current_rate <= self.health_thresholds['success_rate_warning']:
+            if health['status'] == 'healthy':
+                health['status'] = 'warning'
+            health['warnings'].append({
+                'type': 'success_rate_warning',
+                'message': f"成功率が低下: {current_rate*100:.1f}%",
+                'threshold': f"{self.health_thresholds['success_rate_warning']*100:.0f}%",
+                'severity': 'medium'
+            })
+        
+        # 連続エラーチェック
+        consecutive_errors = metrics['consecutive_errors']
+        if consecutive_errors >= self.health_thresholds['consecutive_errors_critical']:
+            health['status'] = 'critical'
+            health['alerts'].append({
+                'type': 'consecutive_errors_critical',
+                'message': f"連続エラー数が危険レベル: {consecutive_errors}回",
+                'threshold': f"{self.health_thresholds['consecutive_errors_critical']}回",
+                'severity': 'high'
+            })
+        elif consecutive_errors >= self.health_thresholds['consecutive_errors_warning']:
+            if health['status'] == 'healthy':
+                health['status'] = 'warning'
+            health['warnings'].append({
+                'type': 'consecutive_errors_warning',
+                'message': f"連続エラーが発生: {consecutive_errors}回",
+                'threshold': f"{self.health_thresholds['consecutive_errors_warning']}回",
+                'severity': 'medium'
+            })
+        
+        # 停止状態チェック
+        if self.check_suspension_status():
+            health['status'] = 'suspended'
+            health['alerts'].append({
+                'type': 'system_suspended',
+                'message': "システムが一時停止中",
+                'severity': 'high'
+            })
+        
+        # アップタイム情報
+        health['uptime_info'] = {
+            'last_success': metrics.get('last_success'),
+            'last_error': metrics.get('last_error'),
+            'total_executions': metrics.get('total_executions', 0),
+            'successful_executions': metrics.get('successful_executions', 0)
+        }
+        
+        # パフォーマンス要約
+        health['performance_summary'] = {
+            'current_success_rate': f"{current_rate*100:.1f}%",
+            'weekly_success_rate': f"{weekly_rate*100:.1f}%",
+            'trend': metrics['trend'],
+            'consecutive_errors': consecutive_errors,
+            'system_mode': 'dry_run' if self.dry_run else 'live',
+            'gradual_mode': self.gradual_mode
+        }
+        
+        return health
+    
+    def create_github_alert(self, alert_type: str, message: str, details: dict = None):
+        """GitHub Issue でアラート作成"""
+        if not os.environ.get("GITHUB_TOKEN") or self.dry_run:
+            # GitHub トークンがない場合、またはドライランの場合はログのみ
+            self.log_action("GITHUB_ALERT_SKIPPED", {
+                "alert_type": alert_type,
+                "message": message,
+                "reason": "no_token_or_dry_run"
+            })
+            return
+        
+        try:
+            import requests
+            
+            # Issue 作成用データ
+            issue_title = f"🚨 楽天ROOM自動化アラート: {alert_type}"
+            issue_body = f"""
+## アラート詳細
+
+**種類**: {alert_type}
+**メッセージ**: {message}
+**発生日時**: {datetime.now().isoformat()}
+
+## システム状態
+"""
+            
+            if details:
+                for key, value in details.items():
+                    issue_body += f"- **{key}**: {value}\n"
+            
+            issue_body += f"""
+
+## 推奨対応
+1. システムログを確認
+2. 楽天ROOMサイトの状態確認
+3. 必要に応じて手動でのテスト実行
+
+---
+*このIssueは楽天ROOM自動化システムにより自動作成されました*
+"""
+            
+            # GitHub API リクエスト
+            headers = {
+                "Authorization": f"token {os.environ['GITHUB_TOKEN']}",
+                "Accept": "application/vnd.github.v3+json"
+            }
+            
+            data = {
+                "title": issue_title,
+                "body": issue_body,
+                "labels": ["alert", "automation", "monitoring"]
+            }
+            
+            response = requests.post(
+                "https://api.github.com/repos/sasayosh1/rakuten-room2/issues",
+                headers=headers,
+                json=data,
+                timeout=30
+            )
+            
+            if response.status_code == 201:
+                issue_url = response.json()["html_url"]
+                self.log_action("GITHUB_ALERT_CREATED", {
+                    "alert_type": alert_type,
+                    "issue_url": issue_url
+                })
+                print(f"🔔 GitHub アラート作成: {issue_url}")
+            else:
+                self.log_action("GITHUB_ALERT_FAILED", {
+                    "alert_type": alert_type,
+                    "status_code": response.status_code,
+                    "error": response.text
+                }, "ERROR")
+                
+        except Exception as e:
+            self.log_action("GITHUB_ALERT_ERROR", {
+                "alert_type": alert_type,
+                "error": str(e)
+            }, "ERROR")
+    
+    def process_health_alerts(self, health: dict):
+        """ヘルスチェック結果に基づくアラート処理"""
+        # 重要なアラートの場合のみGitHub Issue作成
+        for alert in health.get('alerts', []):
+            if alert['severity'] == 'high':
+                self.create_github_alert(
+                    alert['type'],
+                    alert['message'],
+                    health['performance_summary']
+                )
+        
+        # ヘルス状態をファイルに保存
+        health_file = f"system_health_{date.today().isoformat()}.json"
+        with open(health_file, "w", encoding="utf-8") as f:
+            json.dump(health, f, ensure_ascii=False, indent=2)
+    
+    def record_execution_metrics(self, execution_data: dict):
+        """実行メトリクスを記録"""
+        metrics_data = {
+            'executions': [],
+            'summary': {
+                'total_executions': 0,
+                'successful_executions': 0,
+                'failed_executions': 0,
+                'last_updated': datetime.now().isoformat()
+            }
+        }
+        
+        # 既存データの読み込み
+        if self.metrics_file.exists():
+            with open(self.metrics_file, "r", encoding="utf-8") as f:
+                metrics_data = json.load(f)
+        
+        # 新しい実行データを追加
+        execution_record = {
+            'timestamp': datetime.now().isoformat(),
+            'success': execution_data.get('success', False),
+            'posted_count': execution_data.get('posted_count', 0),
+            'target_count': execution_data.get('target_count', 0),
+            'mode': execution_data.get('mode', 'unknown'),
+            'execution_time': execution_data.get('execution_time', 0),
+            'errors': execution_data.get('errors', []),
+            'dry_run': self.dry_run,
+            'gradual_mode': self.gradual_mode
+        }
+        
+        metrics_data['executions'].append(execution_record)
+        
+        # 直近100件のみ保持
+        metrics_data['executions'] = metrics_data['executions'][-100:]
+        
+        # サマリー更新
+        total_execs = len(metrics_data['executions'])
+        successful_execs = sum(1 for exec_data in metrics_data['executions'] if exec_data['success'])
+        
+        metrics_data['summary'].update({
+            'total_executions': total_execs,
+            'successful_executions': successful_execs,
+            'failed_executions': total_execs - successful_execs,
+            'success_rate': successful_execs / total_execs if total_execs > 0 else 0,
+            'last_updated': datetime.now().isoformat()
+        })
+        
+        # ファイルに保存
+        with open(self.metrics_file, "w", encoding="utf-8") as f:
+            json.dump(metrics_data, f, ensure_ascii=False, indent=2)
+        
+        self.log_action("METRICS_RECORDED", execution_record)
+    
+    def generate_performance_report(self) -> dict:
+        """パフォーマンスレポート生成"""
+        report = {
+            'report_date': datetime.now().isoformat(),
+            'period_summary': {},
+            'trend_analysis': {},
+            'recommendations': []
+        }
+        
+        if not self.metrics_file.exists():
+            report['period_summary'] = {'message': 'データ不足：メトリクスが蓄積されていません'}
+            return report
+        
+        with open(self.metrics_file, "r", encoding="utf-8") as f:
+            metrics_data = json.load(f)
+        
+        executions = metrics_data.get('executions', [])
+        if not executions:
+            report['period_summary'] = {'message': 'データ不足：実行履歴がありません'}
+            return report
+        
+        # 期間別サマリー
+        from datetime import timedelta
+        now = datetime.now()
+        
+        # 過去7日間の分析
+        week_cutoff = now - timedelta(days=7)
+        week_execs = [
+            exec_data for exec_data in executions
+            if datetime.fromisoformat(exec_data['timestamp']) > week_cutoff
+        ]
+        
+        # 過去30日間の分析
+        month_cutoff = now - timedelta(days=30)
+        month_execs = [
+            exec_data for exec_data in executions
+            if datetime.fromisoformat(exec_data['timestamp']) > month_cutoff
+        ]
+        
+        report['period_summary'] = {
+            'week_stats': {
+                'total': len(week_execs),
+                'successful': sum(1 for e in week_execs if e['success']),
+                'success_rate': sum(1 for e in week_execs if e['success']) / len(week_execs) if week_execs else 0
+            },
+            'month_stats': {
+                'total': len(month_execs),
+                'successful': sum(1 for e in month_execs if e['success']),
+                'success_rate': sum(1 for e in month_execs if e['success']) / len(month_execs) if month_execs else 0
+            }
+        }
+        
+        # トレンド分析
+        week_rate = report['period_summary']['week_stats']['success_rate']
+        month_rate = report['period_summary']['month_stats']['success_rate']
+        
+        if week_rate > month_rate + 0.1:
+            trend = 'improving'
+        elif week_rate < month_rate - 0.1:
+            trend = 'degrading'
+        else:
+            trend = 'stable'
+        
+        report['trend_analysis'] = {
+            'trend': trend,
+            'week_vs_month': f"{(week_rate - month_rate)*100:+.1f}%",
+            'confidence': 'high' if len(week_execs) >= 3 else 'low'
+        }
+        
+        # 推奨事項
+        if week_rate < 0.7:
+            report['recommendations'].append("成功率が低下しています。システムの点検を推奨します。")
+        if trend == 'degrading':
+            report['recommendations'].append("成功率が悪化傾向です。楽天ROOMサイトの変更確認を推奨します。")
+        if len(week_execs) == 0:
+            report['recommendations'].append("実行頻度が低すぎます。設定を確認してください。")
+        
+        if not report['recommendations']:
+            report['recommendations'].append("システムは正常に動作しています。")
+        
+        return report
     
     def should_allow_posting(self) -> bool:
         """段階的実行モード：投稿を許可するかチェック"""
         if not self.gradual_mode:
             return True  # 段階的モードが無効なら常に許可
         
-        success_rate = self.calculate_success_rate()
-        print(f"📊 現在の成功率: {success_rate*100:.1f}%")
+        metrics = self.calculate_success_rate()
+        success_rate = metrics['current_rate']
+        
+        print(f"📊 システム状態:")
+        print(f"   現在の成功率: {success_rate*100:.1f}%")
+        print(f"   週間成功率: {metrics['weekly_rate']*100:.1f}%")
+        print(f"   連続エラー: {metrics['consecutive_errors']}回")
+        print(f"   トレンド: {metrics['trend']}")
         
         if success_rate >= self.success_threshold:
             print(f"✅ 成功率が閾値({self.success_threshold*100:.0f}%)以上のため投稿を実行")
@@ -503,13 +882,37 @@ class RoomPoster:
 
 def main():
     """メイン実行"""
+    start_time = datetime.now()
+    execution_errors = []
+    
     try:
         poster = RoomPoster()
+        
+        # システムヘルス監視
+        health = poster.monitor_system_health()
+        poster.process_health_alerts(health)
+        
+        print(f"🏥 システム状態: {health['status']}")
+        if health['alerts']:
+            print(f"🚨 アラート: {len(health['alerts'])}件")
+        if health['warnings']:
+            print(f"⚠️  警告: {len(health['warnings'])}件")
         
         # 停止状態チェック
         if poster.check_suspension_status():
             poster.log_action("EXECUTION_SKIPPED", {"reason": "system_suspended"}, "WARNING")
             print("システム停止中のため実行をスキップします")
+            
+            # メトリクス記録
+            execution_time = (datetime.now() - start_time).total_seconds()
+            poster.record_execution_metrics({
+                'success': False,
+                'posted_count': 0,
+                'target_count': 0,
+                'mode': 'suspended',
+                'execution_time': execution_time,
+                'errors': ['system_suspended']
+            })
             return 0
         
         # 投稿可能数チェック
@@ -543,14 +946,46 @@ def main():
             posted_count = poster.post_to_room(products)
         
         # 結果に応じて成功/失敗を記録
+        execution_time = (datetime.now() - start_time).total_seconds()
+        execution_mode = 'dry_run' if poster.dry_run else ('gradual' if poster.gradual_mode else 'live')
+        
         if posted_count > 0:
             poster.record_success()
             poster.log_action("EXECUTION_SUCCESS", {"posted_count": posted_count, "products_count": len(products)})
             print(f"✅ 投稿成功: {posted_count}件")
+            
+            # 成功メトリクス記録
+            poster.record_execution_metrics({
+                'success': True,
+                'posted_count': posted_count,
+                'target_count': len(products),
+                'mode': execution_mode,
+                'execution_time': execution_time,
+                'errors': execution_errors
+            })
         else:
             poster.record_error("POST_FAILURE", "投稿に失敗しました")
             poster.log_action("EXECUTION_FAILURE", {"posted_count": 0, "products_count": len(products)}, "ERROR")
             print("❌ 投稿失敗")
+            
+            # 失敗メトリクス記録
+            execution_errors.append("post_failure")
+            poster.record_execution_metrics({
+                'success': False,
+                'posted_count': 0,
+                'target_count': len(products),
+                'mode': execution_mode,
+                'execution_time': execution_time,
+                'errors': execution_errors
+            })
+        
+        # パフォーマンスレポート生成（週次）
+        if datetime.now().weekday() == 0:  # 月曜日
+            report = poster.generate_performance_report()
+            report_file = f"performance_report_{date.today().isoformat()}.json"
+            with open(report_file, "w", encoding="utf-8") as f:
+                json.dump(report, f, ensure_ascii=False, indent=2)
+            print(f"📊 週次パフォーマンスレポート生成: {report_file}")
         
         return posted_count
         
@@ -559,6 +994,18 @@ def main():
         try:
             poster = RoomPoster()
             poster.record_error("SYSTEM_ERROR", str(e))
+            
+            # システムエラーのメトリクス記録
+            execution_time = (datetime.now() - start_time).total_seconds()
+            execution_errors.append(f"system_error: {str(e)}")
+            poster.record_execution_metrics({
+                'success': False,
+                'posted_count': 0,
+                'target_count': 0,
+                'mode': 'error',
+                'execution_time': execution_time,
+                'errors': execution_errors
+            })
         except:
             pass
         return 0
