@@ -2,11 +2,8 @@ name: 楽天ROOM自動化
 
 on:
   schedule:
-    # 人間らしいランダムな時間で実行（JST）
-    - cron: '25 1 * * 1,3,5'    # 月水金 午前10:25
-    - cron: '40 5 * * 2,4'      # 火木 午後14:40
-    - cron: '15 9 * * 6'        # 土 午後18:15  
-    - cron: '50 12 * * 0'       # 日 午後21:50
+    # 安全性重視：週1回のみ実行（JST）
+    - cron: '25 1 * * 1'        # 月曜 午前10:25のみ
   workflow_dispatch:
     inputs:
       mode:
@@ -25,7 +22,7 @@ on:
       max_posts:
         description: '最大投稿数'
         required: false
-        default: '2'
+        default: '1'
 
 jobs:
   automation:
@@ -101,7 +98,7 @@ jobs:
       run: |
         MODE="${{ github.event.inputs.mode || 'collect' }}"
         PRODUCTS="${{ github.event.inputs.products || '2' }}"
-        MAX_POSTS="${{ github.event.inputs.max_posts || '2' }}"
+        MAX_POSTS="${{ github.event.inputs.max_posts || '1' }}"
         
         echo "実行設定:"
         echo "  モード: $MODE"

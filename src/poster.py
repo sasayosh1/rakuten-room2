@@ -31,8 +31,11 @@ class RoomPoster:
         self.gc = gspread.service_account_from_dict(sa_info)
         self.sh = self.gc.open_by_key(os.environ["GSPREAD_KEY"])
         
-        self.daily_limit = 3  # 1日最大投稿数
+        self.daily_limit = 1  # 1日最大投稿数（安全性重視）
         self.stats_file = Path("daily_stats.json")
+        self.error_file = Path("error_tracking.json")
+        self.max_consecutive_errors = 3  # 連続失敗上限
+        self.suspension_hours = 24  # 停止時間（時間）
     
     def get_daily_stats(self) -> Dict:
         """本日の投稿統計取得"""
@@ -66,6 +69,66 @@ class RoomPoster:
         
         with open(self.stats_file, "w", encoding="utf-8") as f:
             json.dump(stats, f, ensure_ascii=False, indent=2)
+    
+    def check_suspension_status(self) -> bool:
+        """停止状態をチェック"""
+        if not self.error_file.exists():
+            return False
+        
+        with open(self.error_file, "r", encoding="utf-8") as f:
+            error_data = json.load(f)
+        
+        suspended_until = error_data.get("suspended_until")
+        if suspended_until:
+            suspend_time = datetime.fromisoformat(suspended_until)
+            if datetime.now() < suspend_time:
+                print(f"⏸️  システム停止中（解除予定: {suspended_until}）")
+                return True
+        
+        return False
+    
+    def record_error(self, error_type: str, error_msg: str):
+        """エラー記録"""
+        if self.error_file.exists():
+            with open(self.error_file, "r", encoding="utf-8") as f:
+                error_data = json.load(f)
+        else:
+            error_data = {"consecutive_errors": 0, "last_errors": []}
+        
+        # エラー記録更新
+        error_data["consecutive_errors"] += 1
+        error_data["last_errors"].append({
+            "timestamp": datetime.now().isoformat(),
+            "type": error_type,
+            "message": error_msg
+        })
+        
+        # 直近10件のみ保持
+        error_data["last_errors"] = error_data["last_errors"][-10:]
+        
+        # 連続失敗が上限に達したら停止
+        if error_data["consecutive_errors"] >= self.max_consecutive_errors:
+            from datetime import timedelta
+            suspend_until = datetime.now() + timedelta(hours=self.suspension_hours)
+            error_data["suspended_until"] = suspend_until.isoformat()
+            print(f"🚨 連続失敗{self.max_consecutive_errors}回に達しました。{self.suspension_hours}時間停止します。")
+        
+        with open(self.error_file, "w", encoding="utf-8") as f:
+            json.dump(error_data, f, ensure_ascii=False, indent=2)
+    
+    def record_success(self):
+        """成功記録（エラーカウンタリセット）"""
+        if self.error_file.exists():
+            with open(self.error_file, "r", encoding="utf-8") as f:
+                error_data = json.load(f)
+            
+            # 連続エラーカウンタをリセット
+            error_data["consecutive_errors"] = 0
+            if "suspended_until" in error_data:
+                del error_data["suspended_until"]
+            
+            with open(self.error_file, "w", encoding="utf-8") as f:
+                json.dump(error_data, f, ensure_ascii=False, indent=2)
     
     def get_products_to_post(self, max_count: int = 3) -> List[Dict]:
         """投稿用商品データ取得"""
@@ -281,6 +344,11 @@ def main():
     try:
         poster = RoomPoster()
         
+        # 停止状態チェック
+        if poster.check_suspension_status():
+            print("システム停止中のため実行をスキップします")
+            return 0
+        
         # 投稿可能数チェック
         daily_stats = poster.get_daily_stats()
         remaining = poster.daily_limit - daily_stats["posts"]
@@ -301,10 +369,24 @@ def main():
         
         # 投稿実行
         posted_count = poster.post_to_room(products)
+        
+        # 結果に応じて成功/失敗を記録
+        if posted_count > 0:
+            poster.record_success()
+            print(f"✅ 投稿成功: {posted_count}件")
+        else:
+            poster.record_error("POST_FAILURE", "投稿に失敗しました")
+            print("❌ 投稿失敗")
+        
         return posted_count
         
     except Exception as e:
-        print(f"エラー: {e}")
+        print(f"❌ システムエラー: {e}")
+        try:
+            poster = RoomPoster()
+            poster.record_error("SYSTEM_ERROR", str(e))
+        except:
+            pass
         return 0
 
 
