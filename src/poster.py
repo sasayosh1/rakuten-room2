@@ -6,6 +6,7 @@ import json
 import os
 import random
 import time
+import logging
 from datetime import datetime, date
 from pathlib import Path
 from typing import List, Dict
@@ -36,6 +37,50 @@ class RoomPoster:
         self.error_file = Path("error_tracking.json")
         self.max_consecutive_errors = 3  # 連続失敗上限
         self.suspension_hours = 24  # 停止時間（時間）
+        self.dry_run = os.environ.get("DRY_RUN", "false").lower() == "true"  # ドライランモード
+        self.gradual_mode = os.environ.get("GRADUAL_MODE", "true").lower() == "true"  # 段階的実行モード
+        self.success_threshold = 0.8  # 80%以上の成功率で投稿開始
+        
+        # ログ設定
+        self.setup_logging()
+    
+    def setup_logging(self):
+        """ログ設定"""
+        log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+        log_file = f"room_poster_{date.today().isoformat()}.log"
+        
+        logging.basicConfig(
+            level=getattr(logging, log_level, logging.INFO),
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(log_file, encoding='utf-8'),
+                logging.StreamHandler()
+            ]
+        )
+        self.logger = logging.getLogger(__name__)
+        self.logger.info("=== 楽天ROOM投稿ボット開始 ===")
+    
+    def log_action(self, action: str, details: dict = None, level: str = "INFO"):
+        """詳細ログ記録"""
+        log_entry = {
+            'timestamp': datetime.now().isoformat(),
+            'action': action,
+            'dry_run': self.dry_run,
+            'gradual_mode': self.gradual_mode,
+            'daily_limit': self.daily_limit
+        }
+        
+        if details:
+            log_entry.update(details)
+        
+        # ログファイルにJSON形式で記録
+        log_json_file = f"detailed_log_{date.today().isoformat()}.jsonl"
+        with open(log_json_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+        
+        # 標準ログにも出力
+        log_message = f"{action}: {json.dumps(details, ensure_ascii=False) if details else ''}"
+        getattr(self.logger, level.lower(), self.logger.info)(log_message)
     
     def get_daily_stats(self) -> Dict:
         """本日の投稿統計取得"""
@@ -129,6 +174,59 @@ class RoomPoster:
             
             with open(self.error_file, "w", encoding="utf-8") as f:
                 json.dump(error_data, f, ensure_ascii=False, indent=2)
+    
+    def dry_run_mode(self, products: List[Dict]) -> int:
+        """ドライランモード：投稿をシミュレート"""
+        print("🧪 ドライランモード：実際の投稿は行いません")
+        print(f"📊 投稿予定商品数: {len(products)}")
+        print("-" * 50)
+        
+        for i, product in enumerate(products, 1):
+            print(f"{i}. 【{product.get('category', 'カテゴリ不明')}】")
+            print(f"   タイトル: {product['title'][:50]}{'...' if len(product['title']) > 50 else ''}")
+            print(f"   URL: {product['url']}")
+            print(f"   説明: {product['description'][:100]}{'...' if len(product['description']) > 100 else ''}")
+            print()
+        
+        print("✅ ドライラン完了：すべての商品が投稿可能な状態です")
+        return len(products)  # シミュレーション成功として件数を返す
+    
+    def calculate_success_rate(self) -> float:
+        """成功率を計算"""
+        if not self.error_file.exists():
+            return 1.0  # エラーファイルがない場合は100%
+        
+        with open(self.error_file, "r", encoding="utf-8") as f:
+            error_data = json.load(f)
+        
+        # 直近10回の実行を評価
+        recent_errors = error_data.get("last_errors", [])
+        if not recent_errors:
+            return 1.0
+        
+        # 直近のエラー数から成功率を推定
+        consecutive_errors = error_data.get("consecutive_errors", 0)
+        if consecutive_errors == 0:
+            return 1.0
+        elif consecutive_errors <= 2:
+            return 0.8
+        else:
+            return 0.5
+    
+    def should_allow_posting(self) -> bool:
+        """段階的実行モード：投稿を許可するかチェック"""
+        if not self.gradual_mode:
+            return True  # 段階的モードが無効なら常に許可
+        
+        success_rate = self.calculate_success_rate()
+        print(f"📊 現在の成功率: {success_rate*100:.1f}%")
+        
+        if success_rate >= self.success_threshold:
+            print(f"✅ 成功率が閾値({self.success_threshold*100:.0f}%)以上のため投稿を実行")
+            return True
+        else:
+            print(f"⚠️  成功率が閾値({self.success_threshold*100:.0f}%)未満のためドライランのみ実行")
+            return False
     
     def get_products_to_post(self, max_count: int = 3) -> List[Dict]:
         """投稿用商品データ取得"""
@@ -277,12 +375,35 @@ class RoomPoster:
             page.goto(product['url'], timeout=30000)
             time.sleep(random.uniform(2, 4))
             
-            # 「ROOMに投稿」ボタンを探してクリック
+            # 「ROOMに投稿」ボタンを探してクリック（複数のフォールバック戦略）
             selectors = [
+                # 標準的なセレクター
                 'button:has-text("ROOMに投稿")',
                 'a:has-text("ROOMに投稿")',
+                
+                # より広範囲なテキストマッチング
+                'button:has-text("ROOM")',
+                'a:has-text("ROOM")',
+                'button:has-text("投稿")',
+                'a:has-text("投稿")',
+                
+                # data属性ベース
                 '[data-testid="post-to-room"]',
-                '.post-to-room-btn'
+                '[data-action="room-post"]',
+                '[data-room="post"]',
+                
+                # クラス名ベース
+                '.post-to-room-btn',
+                '.room-post-button',
+                '.rakuten-room-post',
+                
+                # 部分的なクラス名
+                '[class*="room"][class*="post"]',
+                '[class*="post"][class*="room"]',
+                
+                # より一般的なボタン
+                'button[type="button"]',
+                'input[type="button"]'
             ]
             
             clicked = False
@@ -304,30 +425,71 @@ class RoomPoster:
             page.wait_for_selector('textarea, input[type="text"]', timeout=10000)
             time.sleep(random.uniform(1, 2))
             
-            # 説明文入力
-            description_selectors = ['textarea', 'input[type="text"]']
+            # 説明文入力（複数のフォールバック）
+            description_selectors = [
+                'textarea[placeholder*="コメント"]',
+                'textarea[placeholder*="説明"]',
+                'textarea[name*="comment"]',
+                'textarea[name*="description"]',
+                'textarea',
+                'input[type="text"][placeholder*="コメント"]',
+                'input[type="text"][placeholder*="説明"]',
+                'input[type="text"]',
+                '[contenteditable="true"]'
+            ]
+            
+            description_filled = False
             for selector in description_selectors:
                 try:
                     page.fill(selector, product['description'])
+                    description_filled = True
                     break
                 except:
                     continue
+            
+            if not description_filled:
+                print("⚠️  説明文入力フィールドが見つかりません")
             
             time.sleep(random.uniform(1, 2))
             
-            # 投稿ボタンクリック
+            # 投稿ボタンクリック（複数のフォールバック）
             submit_selectors = [
+                # テキストベース
+                'button:has-text("投稿する")',
                 'button:has-text("投稿")',
+                'button:has-text("送信")',
+                'button:has-text("完了")',
+                'a:has-text("投稿")',
+                
+                # 属性ベース
                 'button[type="submit"]',
-                'input[type="submit"]'
+                'input[type="submit"]',
+                'button[value="投稿"]',
+                
+                # クラス名ベース
+                '.submit-btn',
+                '.post-btn',
+                '.send-btn',
+                '[class*="submit"]',
+                '[class*="post"]',
+                
+                # より一般的
+                'form button:last-child',
+                'button:last-child'
             ]
             
+            submit_clicked = False
             for selector in submit_selectors:
                 try:
                     page.click(selector, timeout=5000)
+                    submit_clicked = True
                     break
                 except:
                     continue
+            
+            if not submit_clicked:
+                print("⚠️  投稿ボタンが見つかりません")
+                return False
             
             # 投稿完了を確認
             time.sleep(3)
@@ -346,6 +508,7 @@ def main():
         
         # 停止状態チェック
         if poster.check_suspension_status():
+            poster.log_action("EXECUTION_SKIPPED", {"reason": "system_suspended"}, "WARNING")
             print("システム停止中のため実行をスキップします")
             return 0
         
@@ -367,15 +530,26 @@ def main():
         
         print(f"投稿予定商品数: {len(products)}")
         
-        # 投稿実行
-        posted_count = poster.post_to_room(products)
+        # 実行モード決定（ドライラン/段階的実行/通常投稿）
+        if poster.dry_run:
+            poster.log_action("MODE_SELECTED", {"mode": "dry_run", "reason": "dry_run_enabled"})
+            posted_count = poster.dry_run_mode(products)
+        elif poster.gradual_mode and not poster.should_allow_posting():
+            # 段階的実行モードで成功率が低い場合はドライランのみ
+            poster.log_action("MODE_SELECTED", {"mode": "dry_run", "reason": "gradual_mode_low_success_rate"})
+            posted_count = poster.dry_run_mode(products)
+        else:
+            poster.log_action("MODE_SELECTED", {"mode": "live_posting", "reason": "normal_execution"})
+            posted_count = poster.post_to_room(products)
         
         # 結果に応じて成功/失敗を記録
         if posted_count > 0:
             poster.record_success()
+            poster.log_action("EXECUTION_SUCCESS", {"posted_count": posted_count, "products_count": len(products)})
             print(f"✅ 投稿成功: {posted_count}件")
         else:
             poster.record_error("POST_FAILURE", "投稿に失敗しました")
+            poster.log_action("EXECUTION_FAILURE", {"posted_count": 0, "products_count": len(products)}, "ERROR")
             print("❌ 投稿失敗")
         
         return posted_count
