@@ -24,6 +24,10 @@ on:
         required: false
         default: '1'
 
+  push:
+    branches:
+      - main
+
 jobs:
   automation:
     runs-on: ubuntu-latest
