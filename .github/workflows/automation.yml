@@ -100,7 +100,9 @@ jobs:
         GSA_JSON_B64: ${{ secrets.GSA_JSON_B64 }}
         DISPLAY: :99
       run: |
-        MODE="${{ github.event.inputs.mode || 'collect' }}"
+        # 手動実行時は入力値、スケジュール / push 時はデフォルト値
+        MODE="${{ github.event.inputs.mode }}"
+        [ -z "$MODE" ] && MODE="full"
         PRODUCTS="${{ github.event.inputs.products || '2' }}"
         MAX_POSTS="${{ github.event.inputs.max_posts || '1' }}"
         
