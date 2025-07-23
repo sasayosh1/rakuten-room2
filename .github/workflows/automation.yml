@@ -9,7 +9,7 @@ on:
       mode:
         description: '実行モード'
         required: true
-        default: 'collect'
+        default: 'full'
         type: choice
         options:
         - collect
